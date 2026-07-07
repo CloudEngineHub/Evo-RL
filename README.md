@@ -563,7 +563,7 @@ The dataset is designed to support offline RL, value learning, advantage-conditi
 - Documentation: [`docs/README.md`](./docs/README.md)
 - GitHub Issues: [Create an issue](https://github.com/MINT-SJTU/Evo-RL/issues)
 - Email: business@evomind-tech.com
-- WeChat group QR code:
+- Get into WeChat group by scanning QR code:
 
 <p align="center">
   <!-- <img alt="EvoMind WeChat QR" src="./website/assets/images/rlgroup.jpg" width="220"/> -->
