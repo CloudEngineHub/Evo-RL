@@ -566,7 +566,8 @@ The dataset is designed to support offline RL, value learning, advantage-conditi
 - WeChat group QR code:
 
 <p align="center">
-  <img alt="EvoMind WeChat QR" src="./website/assets/images/rlgroup.jpg" width="220"/>
+  <!-- <img alt="EvoMind WeChat QR" src="./website/assets/images/rlgroup.jpg" width="220"/> -->
+  <img alt="EvoMind WeChat QR" src="./website/assets/images/WZJHOfficial.png" width="220"/>
 </p>
 
 - So101 Supplier WeChat Contact, So101 设备提供商:
