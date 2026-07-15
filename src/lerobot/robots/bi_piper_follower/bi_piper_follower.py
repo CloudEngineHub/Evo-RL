@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 from functools import cached_property
 
 from lerobot.processor import RobotAction, RobotObservation
@@ -28,8 +27,6 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 
 from ..robot import Robot
 from .config_bi_piper_follower import BiPiperFollowerConfig, BiPiperXFollowerConfig
-
-logger = logging.getLogger(__name__)
 
 
 class BiPiperFollower(Robot):
@@ -45,11 +42,8 @@ class BiPiperFollower(Robot):
         "startup_sleep_s",
         "speed_ratio",
         "high_follow",
-        "mode_refresh_interval_s",
         "enable_on_connect",
         "enable_timeout_s",
-        "calibration_scale",
-        "require_calibration",
         "sync_gripper",
         "gripper_effort_default",
         "gripper_status_code",
@@ -60,11 +54,11 @@ class BiPiperFollower(Robot):
     def _build_arm_config(self, arm_config_cls, side_cfg, side: str):
         kwargs = {name: getattr(side_cfg, name) for name in self._side_field_names}
         kwargs["id"] = f"{self.config.id}_{side}" if self.config.id else None
-        kwargs["calibration_dir"] = self.config.calibration_dir
         return arm_config_cls(**kwargs)
 
     def __init__(self, config: BiPiperFollowerConfig | BiPiperXFollowerConfig):
-        super().__init__(config)
+        self.robot_type = self.name
+        self.id = config.id
         self.config = config
 
         if config.type == "bi_piperx_follower":
@@ -115,20 +109,16 @@ class BiPiperFollower(Robot):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        self.left_arm.connect(calibrate)
-        self.right_arm.connect(calibrate)
-
-    def set_teleop_send_only_mode(self, enabled: bool) -> None:
-        self.left_arm.set_teleop_send_only_mode(enabled)
-        self.right_arm.set_teleop_send_only_mode(enabled)
+        del calibrate
+        self.left_arm.connect()
+        self.right_arm.connect()
 
     @property
     def is_calibrated(self) -> bool:
-        return self.left_arm.is_calibrated and self.right_arm.is_calibrated
+        return True
 
     def calibrate(self) -> None:
-        self.left_arm.calibrate()
-        self.right_arm.calibrate()
+        pass
 
     def configure(self) -> None:
         self.left_arm.configure()

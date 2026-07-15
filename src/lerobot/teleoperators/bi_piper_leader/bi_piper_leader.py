@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import multiprocessing as mp
 import traceback
+from contextlib import suppress
 from functools import cached_property
 from typing import Any
 
@@ -27,13 +27,11 @@ from lerobot.teleoperators.piper_leader import (
     PiperXLeader,
     PiperXLeaderConfig,
 )
-from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 
 from ..teleoperator import Teleoperator
 from .config_bi_piper_leader import BiPiperLeaderConfig, BiPiperXLeaderConfig
-
-logger = logging.getLogger(__name__)
 
 
 def _bi_piper_leader_worker(conn, arm_cls, arm_config) -> None:
@@ -46,12 +44,9 @@ def _bi_piper_leader_worker(conn, arm_cls, arm_config) -> None:
                 break
 
             try:
-                if command == "__get_is_calibrated__":
-                    result = arm.is_calibrated
-                else:
-                    args = request.get("args", ())
-                    kwargs = request.get("kwargs", {})
-                    result = getattr(arm, command)(*args, **kwargs)
+                args = request.get("args", ())
+                kwargs = request.get("kwargs", {})
+                result = getattr(arm, command)(*args, **kwargs)
                 conn.send({"ok": True, "result": result})
             except Exception as exc:  # noqa: BLE001
                 conn.send(
@@ -91,12 +86,6 @@ class _PiperLeaderProcessProxy:
     def is_connected(self) -> bool:
         return self._is_connected
 
-    @property
-    def is_calibrated(self) -> bool:
-        if self._process is None:
-            return False
-        return bool(self._call("__get_is_calibrated__"))
-
     def _ensure_process(self) -> None:
         if self._process is not None and self._process.is_alive():
             return
@@ -123,16 +112,13 @@ class _PiperLeaderProcessProxy:
             f"{response['traceback']}"
         )
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self) -> None:
         try:
-            self._call("connect", calibrate)
+            self._call("connect")
             self._is_connected = True
         except Exception:
             self.disconnect()
             raise
-
-    def calibrate(self) -> None:
-        self._call("calibrate")
 
     def configure(self) -> None:
         self._call("configure")
@@ -155,19 +141,13 @@ class _PiperLeaderProcessProxy:
             return
 
         if self._parent_conn is not None:
-            try:
+            with suppress(Exception):
                 if self._is_connected:
                     self._call("disconnect")
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 self._parent_conn.send({"command": "__close__"})
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 self._parent_conn.close()
-            except Exception:
-                pass
 
         if self._process.is_alive():
             self._process.join(timeout=2.0)
@@ -192,8 +172,6 @@ class BiPiperLeader(Teleoperator):
         "log_level",
         "startup_sleep_s",
         "manual_control",
-        "prefer_ctrl_messages",
-        "fallback_to_feedback",
         "sync_gripper",
         "gripper_effort_default",
         "gripper_status_code",
@@ -201,25 +179,16 @@ class BiPiperLeader(Teleoperator):
         "command_high_follow",
         "mode_refresh_interval_s",
         "enable_timeout_s",
-        "gravity_comp_control_hz",
-        "gravity_comp_tx_ratio",
-        "gravity_comp_torque_limit",
-        "gravity_comp_mit_kp",
-        "gravity_comp_mit_kd",
-        "gravity_comp_base_rpy_deg",
-        "calibration_scale",
-        "require_calibration",
         "disable_on_disconnect",
     )
 
     def _build_arm_config(self, arm_config_cls, side_cfg, side: str):
         kwargs = {name: getattr(side_cfg, name) for name in self._side_field_names}
         kwargs["id"] = f"{self.config.id}_{side}" if self.config.id else None
-        kwargs["calibration_dir"] = self.config.calibration_dir
         return arm_config_cls(**kwargs)
 
     def __init__(self, config: BiPiperLeaderConfig | BiPiperXLeaderConfig):
-        super().__init__(config)
+        self.id = config.id
         self.config = config
         self._use_process_isolation = config.process_isolation
 
@@ -259,16 +228,16 @@ class BiPiperLeader(Teleoperator):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        self.left_arm.connect(calibrate)
-        self.right_arm.connect(calibrate)
+        del calibrate
+        self.left_arm.connect()
+        self.right_arm.connect()
 
     @property
     def is_calibrated(self) -> bool:
-        return self.left_arm.is_calibrated and self.right_arm.is_calibrated
+        return True
 
     def calibrate(self) -> None:
-        self.left_arm.calibrate()
-        self.right_arm.calibrate()
+        pass
 
     def configure(self) -> None:
         self.left_arm.configure()

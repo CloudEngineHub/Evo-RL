@@ -1,7 +1,4 @@
 # ruff: noqa: N802
-import sys
-import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +7,6 @@ import lerobot.robots.piper_follower.piper_follower as piper_follower_module
 import lerobot.teleoperators.bi_piper_leader.bi_piper_leader as bi_piper_leader_module
 import lerobot.teleoperators.piper_leader.piper_leader as piper_leader_module
 import lerobot.utils.piper_sdk as piper_sdk_utils
-from lerobot.motors import MotorCalibration
 from lerobot.processor import make_default_processors
 from lerobot.robots.bi_piper_follower import (
     BiPiperFollower,
@@ -26,6 +22,7 @@ from lerobot.robots.piper_follower import (
     PiperXFollowerConfig,
 )
 from lerobot.robots.utils import make_robot_from_config
+from lerobot.scripts.lerobot_teleoperate import teleop_loop
 from lerobot.teleoperators.bi_piper_leader import (
     BiPiperLeader,
     BiPiperLeaderConfig,
@@ -40,7 +37,6 @@ from lerobot.teleoperators.piper_leader import (
     PiperXLeaderConfig,
     PiperXLeaderConfigBase,
 )
-from lerobot.scripts.lerobot_teleoperate import teleop_loop
 from lerobot.teleoperators.utils import make_teleoperator_from_config
 from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 
@@ -71,6 +67,7 @@ class FakePiperInterface:
         self.disable_calls = 0
         self.is_enabled = False
         self.connect_calls = []
+        self.command_log = []
 
         self._joint_ctrl = SimpleNamespace(
             time_stamp=1.0,
@@ -134,14 +131,19 @@ class FakePiperInterface:
 
     def MotionCtrl_2(self, *args):
         self.mode_commands.append(args)
+        self.command_log.append(("motion_mode", args))
 
     def MasterSlaveConfig(self, *args):
         self.role_commands.append(args)
+        self.command_log.append(("role", args))
         if args and args[0] == 0xFC:
             self._arm_status.arm_status.ctrl_mode = 0x01
+        elif args and args[0] == 0xFA:
+            self._arm_status.arm_status.ctrl_mode = 0x06
 
     def EnablePiper(self):
         self.enable_calls += 1
+        self.command_log.append(("enable", ()))
         self.is_enabled = True
         return True
 
@@ -152,6 +154,7 @@ class FakePiperInterface:
 
     def JointCtrl(self, *args):
         self.last_joint = args
+        self.command_log.append(("joint", args))
 
     def JointMitCtrl(self, *args):
         self.joint_mit_calls.append(args)
@@ -159,6 +162,7 @@ class FakePiperInterface:
     def GripperCtrl(self, *args):
         self.last_gripper = args
         self.gripper_calls.append(args)
+        self.command_log.append(("gripper", args))
 
     def GetArmJointCtrl(self):
         return self._joint_ctrl
@@ -186,41 +190,21 @@ def patch_fake_sdk(monkeypatch):
     monkeypatch.setattr(piper_sdk_utils, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_follower_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
-
-
-def make_identity_calibration():
-    return {
-        key: MotorCalibration(
-            id=idx,
-            drive_mode=0,
-            homing_offset=0,
-            range_min=-200000,
-            range_max=200000,
-        )
-        for idx, key in enumerate(PIPER_ACTION_KEYS)
-    }
-
-
-def wait_until(predicate, timeout_s: float = 0.2, poll_s: float = 0.005) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(poll_s)
-    return False
+    monkeypatch.setattr(piper_follower_module, "resolve_piper_can_interface", lambda serial: serial)
+    monkeypatch.setattr(piper_leader_module, "resolve_piper_can_interface", lambda serial: serial)
 
 
 @pytest.mark.parametrize(
     ("teleop_cfg", "robot_cfg", "teleop_cls", "robot_cls"),
     [
         (
-            PiperLeaderConfig(port="can1", manual_control=False, sync_gripper=True),
+            PiperLeaderConfig(port="can1", manual_control=True, sync_gripper=True),
             PiperFollowerConfig(port="can0", sync_gripper=True),
             PiperLeader,
             PiperFollower,
         ),
         (
-            PiperXLeaderConfig(port="can1", manual_control=False, sync_gripper=True),
+            PiperXLeaderConfig(port="can1", manual_control=True, sync_gripper=True),
             PiperXFollowerConfig(port="can0", sync_gripper=True),
             PiperXLeader,
             PiperXFollower,
@@ -236,12 +220,11 @@ def test_piper_leader_follower_teleop_roundtrip(monkeypatch, teleop_cfg, robot_c
     assert isinstance(teleop, teleop_cls)
     assert isinstance(robot, robot_cls)
 
-    teleop.calibration = make_identity_calibration()
-    robot.calibration = make_identity_calibration()
-
-    teleop.connect(calibrate=False)
-    robot.connect(calibrate=False)
+    teleop.connect()
+    robot.connect()
     try:
+        assert teleop.arm.role_commands[-1] == (0xFA, 0x00, 0x00, 0x00)
+        assert robot.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
         action = teleop.get_action()
         sent = robot.send_action(action)
         obs = robot.get_observation()
@@ -259,6 +242,7 @@ def test_piper_leader_follower_teleop_roundtrip(monkeypatch, teleop_cfg, robot_c
         assert obs["gripper.pos"] == 43.0
 
         teleop.send_feedback(action)
+        assert teleop.arm.role_commands[-1] == (0xFC, 0x00, 0x00, 0x00)
         assert teleop.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
         assert teleop.arm.last_gripper == (
             42000,
@@ -269,38 +253,49 @@ def test_piper_leader_follower_teleop_roundtrip(monkeypatch, teleop_cfg, robot_c
     finally:
         teleop.disconnect()
         robot.disconnect()
+    assert teleop.arm.role_commands[-1] == (0xFA, 0x00, 0x00, 0x00)
 
 
-def test_piper_requires_calibration(monkeypatch):
+def test_piper_does_not_initialize_calibration_state(monkeypatch):
     patch_fake_sdk(monkeypatch)
 
-    teleop = PiperLeader(PiperLeaderConfig(port="can1"))
-    robot = PiperFollower(PiperFollowerConfig(port="can0"))
+    leader = PiperLeader(PiperLeaderConfig(port="can1"))
+    follower = PiperFollower(PiperFollowerConfig(port="can0"))
+    bi_leader = BiPiperLeader(
+        BiPiperLeaderConfig(
+            left_arm_config=PiperLeaderConfigBase(port="can1"),
+            right_arm_config=PiperLeaderConfigBase(port="can3"),
+            process_isolation=False,
+        )
+    )
+    bi_follower = BiPiperFollower(
+        BiPiperFollowerConfig(
+            left_arm_config=PiperFollowerConfigBase(port="can0"),
+            right_arm_config=PiperFollowerConfigBase(port="can2"),
+        )
+    )
 
-    assert not teleop.is_calibrated
-    assert not robot.is_calibrated
-
-    teleop.connect(calibrate=False)
-    robot.connect(calibrate=False)
-    try:
-        with pytest.raises(RuntimeError, match="is not calibrated"):
-            teleop.get_action()
-        with pytest.raises(RuntimeError, match="is not calibrated"):
-            robot.send_action({"joint_1.pos": 0.0})
-    finally:
-        teleop.disconnect()
-        robot.disconnect()
+    devices = [
+        leader,
+        follower,
+        bi_leader,
+        bi_leader.left_arm,
+        bi_leader.right_arm,
+        bi_follower,
+        bi_follower.left_arm,
+        bi_follower.right_arm,
+    ]
+    assert all(not hasattr(device, "calibration") for device in devices)
+    assert all(not hasattr(device, "calibration_fpath") for device in devices)
 
 
 def test_piper_leader_reconnect_reapplies_mode(monkeypatch):
     patch_fake_sdk(monkeypatch)
 
     teleop = PiperLeader(PiperLeaderConfig(port="can1", manual_control=False))
-    teleop.calibration = make_identity_calibration()
-
-    teleop.connect(calibrate=False)
+    teleop.connect()
     teleop.disconnect()
-    teleop.connect(calibrate=False)
+    teleop.connect()
     try:
         assert teleop.arm.enable_calls == 2
     finally:
@@ -337,51 +332,73 @@ def test_piper_follower_connect_rolls_back_connected_cameras(monkeypatch):
     )
 
     robot = PiperFollower(PiperFollowerConfig(port="can0"))
-    robot.calibration = make_identity_calibration()
-
     with pytest.raises(RuntimeError, match="camera connect failed"):
-        robot.connect(calibrate=False)
+        robot.connect()
 
     assert cam_ok.disconnect_calls == 1
     assert not cam_ok.is_connected
     assert not robot.is_connected
 
 
-def test_piper_require_calibration_false_allows_uncalibrated_control(monkeypatch):
+def test_piper_leader_default_uses_hardware_leader_role(monkeypatch):
     patch_fake_sdk(monkeypatch)
+    teleop = PiperLeader(PiperLeaderConfig(port="can1"))
 
-    teleop = PiperLeader(PiperLeaderConfig(port="can1", require_calibration=False))
-    robot = PiperFollower(PiperFollowerConfig(port="can0", require_calibration=False))
-
-    teleop.connect(calibrate=False)
-    robot.connect(calibrate=False)
+    teleop.connect()
     try:
+        assert teleop.arm.connect_calls[-1]["piper_init"] is False
+        assert teleop.arm.role_commands == [(0xFA, 0x00, 0x00, 0x00)]
+        assert teleop.arm.enable_calls == 0
+        assert teleop.arm.mode_commands == []
+        assert teleop.arm.gripper_calls == []
+        assert teleop.arm.joint_mit_calls == []
         action = teleop.get_action()
-        sent = robot.send_action(action)
-        assert sent["joint_1.pos"] == 11.0
-        assert sent["gripper.pos"] == 43.0
+        assert action["joint_1.pos"] == 10.0
+        assert action["joint_2.pos"] == 20.0
+        assert action["gripper.pos"] == 42.0
     finally:
         teleop.disconnect()
-        robot.disconnect()
 
 
-def test_piper_gravity_comp_defaults_are_model_specific():
-    assert PiperLeaderConfig(port="can1").gravity_comp_tx_ratio == (0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
-    assert PiperXLeaderConfig(port="can1").gravity_comp_tx_ratio == (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
-
-
-def test_piper_leader_manual_control_prefers_feedback_state(monkeypatch):
+def test_piper_leader_switches_between_manual_and_policy_control(monkeypatch):
     patch_fake_sdk(monkeypatch)
+    teleop = PiperLeader(PiperLeaderConfig(port="can1"))
+    teleop.connect()
+    try:
+        teleop.arm.command_log.clear()
+        teleop.set_manual_control(False)
+        assert teleop.arm.role_commands[-1] == (0xFC, 0x00, 0x00, 0x00)
+        assert teleop.arm.mode_commands[-1][:3] == (0x01, 0x01, teleop.config.command_speed_ratio)
+        assert teleop.arm.enable_calls == 1
+        assert [name for name, _ in teleop.arm.command_log[:3]] == ["role", "motion_mode", "enable"]
 
-    teleop = PiperLeader(
-        PiperLeaderConfig(
-            port="can1",
-            manual_control=True,
-            require_calibration=False,
-        )
-    )
+        role_count = len(teleop.arm.role_commands)
+        action = {
+            "joint_1.pos": 1.0,
+            "joint_2.pos": 2.0,
+            "joint_3.pos": 3.0,
+            "joint_4.pos": 4.0,
+            "joint_5.pos": 5.0,
+            "joint_6.pos": 6.0,
+            "gripper.pos": 7.0,
+        }
+        teleop.send_feedback(action)
+        assert len(teleop.arm.role_commands) == role_count
+        assert teleop.arm.last_joint == (1000, 2000, 3000, 4000, 5000, 6000)
+        assert teleop.arm.last_gripper[0] == 7000
 
-    teleop.connect(calibrate=False)
+        teleop.set_manual_control(True)
+        assert teleop.arm.role_commands[-1] == (0xFA, 0x00, 0x00, 0x00)
+        assert teleop.arm.joint_mit_calls == []
+    finally:
+        teleop.disconnect()
+
+
+def test_piper_leader_policy_mode_reads_feedback(monkeypatch):
+    patch_fake_sdk(monkeypatch)
+    teleop = PiperLeader(PiperLeaderConfig(port="can1", manual_control=False))
+
+    teleop.connect()
     try:
         action = teleop.get_action()
         assert action["joint_1.pos"] == 11.0
@@ -391,134 +408,51 @@ def test_piper_leader_manual_control_prefers_feedback_state(monkeypatch):
         teleop.disconnect()
 
 
-def test_piper_leader_manual_control_waits_for_fresh_feedback(monkeypatch):
+def test_piper_leader_returns_empty_action_without_manual_frames(monkeypatch):
     patch_fake_sdk(monkeypatch)
-
-    teleop = PiperLeader(
-        PiperLeaderConfig(
-            port="can1",
-            manual_control=True,
-            require_calibration=False,
-        )
-    )
-
-    teleop.connect(calibrate=False)
+    teleop = PiperLeader(PiperLeaderConfig(port="can1"))
+    teleop.connect()
     try:
-        initial = teleop.get_action()
-        assert initial["joint_1.pos"] == 11.0
-
-        def publish_fresh_feedback():
-            time.sleep(0.01)
-            teleop.arm._joint_state.time_stamp = 2.0
-            teleop.arm._joint_state.joint_state.joint_1 = 12000
-            teleop.arm._joint_state.joint_state.joint_2 = 22000
-            teleop.arm._joint_state.joint_state.joint_3 = 32000
-            teleop.arm._joint_state.joint_state.joint_4 = 42000
-            teleop.arm._joint_state.joint_state.joint_5 = 52000
-            teleop.arm._joint_state.joint_state.joint_6 = 62000
-            teleop.arm._gripper_state.time_stamp = 2.0
-            teleop.arm._gripper_state.gripper_state.grippers_angle = 44000
-
-        publisher = threading.Thread(target=publish_fresh_feedback, daemon=True)
-        publisher.start()
-
-        t0 = time.monotonic()
-        action = teleop.get_action()
-        publisher.join(timeout=0.1)
-
-        assert time.monotonic() - t0 >= 0.008
-        assert action["joint_1.pos"] == 12.0
-        assert action["joint_2.pos"] == 22.0
-        assert action["gripper.pos"] == 44.0
+        teleop.arm._joint_ctrl.time_stamp = 0.0
+        assert teleop.get_action() == {}
     finally:
         teleop.disconnect()
 
 
-def test_piper_leader_manual_control_does_not_unblock_on_gripper_feedback_only(monkeypatch):
+def test_piper_leader_failed_policy_switch_restores_manual_role(monkeypatch):
     patch_fake_sdk(monkeypatch)
-
-    teleop = PiperLeader(
-        PiperLeaderConfig(
-            port="can1",
-            manual_control=True,
-            require_calibration=False,
-        )
-    )
-
-    teleop.connect(calibrate=False)
+    teleop = PiperLeader(PiperLeaderConfig(port="can1", enable_timeout_s=0.0))
+    teleop.connect()
     try:
-        initial = teleop.get_action()
-        assert initial["joint_1.pos"] == 11.0
-
-        def publish_feedback():
-            time.sleep(0.005)
-            teleop.arm._gripper_state.time_stamp = 2.0
-            teleop.arm._gripper_state.gripper_state.grippers_angle = 45000
-            time.sleep(0.01)
-            teleop.arm._joint_state.time_stamp = 2.0
-            teleop.arm._joint_state.joint_state.joint_1 = 13000
-            teleop.arm._joint_state.joint_state.joint_2 = 23000
-            teleop.arm._joint_state.joint_state.joint_3 = 33000
-            teleop.arm._joint_state.joint_state.joint_4 = 43000
-            teleop.arm._joint_state.joint_state.joint_5 = 53000
-            teleop.arm._joint_state.joint_state.joint_6 = 63000
-
-        publisher = threading.Thread(target=publish_feedback, daemon=True)
-        publisher.start()
-
-        t0 = time.monotonic()
-        action = teleop.get_action()
-        publisher.join(timeout=0.1)
-
-        assert time.monotonic() - t0 >= 0.013
-        assert action["joint_1.pos"] == 13.0
+        with pytest.raises(RuntimeError, match="did not enable"):
+            teleop.set_manual_control(False)
+        assert teleop._manual_control_enabled is True
+        assert teleop.arm.role_commands[-1][0] == 0xFA
     finally:
         teleop.disconnect()
 
 
-def test_piper_follower_connect_calibrates_then_reenables(monkeypatch, tmp_path):
+def test_piper_leader_disconnect_disables_if_role_restore_fails(monkeypatch):
     patch_fake_sdk(monkeypatch)
+    teleop = PiperLeader(PiperLeaderConfig(port="can1", manual_control=False))
+    teleop.connect()
 
-    robot = PiperFollower(
-        PiperFollowerConfig(
-            port="can0",
-            id="connect_reenable_after_calibration",
-            calibration_dir=tmp_path,
-            require_calibration=True,
-            enable_on_connect=True,
-        )
-    )
+    def fail_role_restore(*args):
+        raise RuntimeError("leader role restore failed")
 
-    def fake_calibrate():
-        # Mirror real calibration's drag-mode behavior.
-        robot.arm.DisableArm(7)
-        robot.calibration = make_identity_calibration()
+    monkeypatch.setattr(teleop.arm, "MasterSlaveConfig", fail_role_restore)
 
-    monkeypatch.setattr(robot, "calibrate", fake_calibrate)
-
-    robot.connect(calibrate=True)
-    try:
-        assert robot.arm.disable_calls == 1
-        assert robot.arm.enable_calls == 1
-        assert robot.arm.is_enabled
-    finally:
-        robot.disconnect()
+    with pytest.raises(RuntimeError, match="leader role restore failed"):
+        teleop.disconnect()
+    assert teleop.arm.disable_calls == 1
+    assert not teleop.arm.connected
 
 
-def test_piper_follower_connect_without_calibration_still_enables(monkeypatch, tmp_path):
+def test_piper_follower_connect_enables_arm(monkeypatch):
     patch_fake_sdk(monkeypatch)
+    robot = PiperFollower(PiperFollowerConfig(port="can0", enable_on_connect=True))
 
-    robot = PiperFollower(
-        PiperFollowerConfig(
-            port="can0",
-            id="connect_enable_without_calibration",
-            calibration_dir=tmp_path,
-            require_calibration=True,
-            enable_on_connect=True,
-        )
-    )
-
-    robot.connect(calibrate=False)
+    robot.connect()
     try:
         assert robot.arm.enable_calls == 1
         assert robot.arm.is_enabled
@@ -527,90 +461,17 @@ def test_piper_follower_connect_without_calibration_still_enables(monkeypatch, t
         robot.disconnect()
 
 
-def test_piper_leader_gravity_comp_manual_control_uses_mit(monkeypatch):
+def test_piper_follower_connect_sets_follower_role_without_restart(monkeypatch):
     patch_fake_sdk(monkeypatch)
-
-    class FakeModel:
-        def __init__(self):
-            self.nq = 6
-            self.nv = 6
-            self.gravity = SimpleNamespace(linear=None)
-
-        def createData(self):
-            return object()
-
-    class FakeRobotWrapper:
-        @staticmethod
-        def BuildFromURDF(urdf_path, package_dirs):
-            del urdf_path, package_dirs
-            return SimpleNamespace(model=FakeModel(), data=object())
-
-    class FakePinocchio:
-        RobotWrapper = FakeRobotWrapper
-
-        @staticmethod
-        def rnea(model, data, q, v, a):
-            del model, data, q, v, a
-            return [0.1] * 6
-
-    monkeypatch.setitem(sys.modules, "pinocchio", FakePinocchio)
-
-    teleop = PiperLeader(
-        PiperLeaderConfig(
-            port="can1",
-            manual_control=True,
-            gravity_comp_control_hz=200.0,
-            mode_refresh_interval_s=0.01,
-        )
-    )
-    teleop.calibration = make_identity_calibration()
-
-    teleop.connect(calibrate=False)
-    try:
-        assert wait_until(lambda: len(teleop.arm.joint_mit_calls) > 0)
-        assert teleop.arm.disable_calls == 0
-        assert len(teleop.arm.joint_mit_calls) > 0
-        assert len(teleop.arm.gripper_calls) > 0
-        assert teleop.arm.gripper_calls[0][2] == 0x00
-
-        teleop.set_manual_control(False)
-        calls_after_stop = len(teleop.arm.joint_mit_calls)
-        time.sleep(0.03)
-        assert len(teleop.arm.joint_mit_calls) == calls_after_stop
-        assert teleop.arm.gripper_calls[-1][2] == 0x01
-    finally:
-        teleop.disconnect()
-
-
-@pytest.mark.parametrize(
-    ("device_kind", "port", "robot_id"),
-    [("leader", "can1", None), ("follower", "can0", "piper_role_guard")],
-)
-def test_piper_connect_fails_and_writes_follower_role_when_in_teach_mode(
-    monkeypatch, device_kind, port, robot_id
-):
-    patch_fake_sdk(monkeypatch)
-
-    if device_kind == "leader":
-        device = PiperLeader(PiperLeaderConfig(port=port))
-    else:
-        device = PiperFollower(PiperFollowerConfig(port=port, id=robot_id))
+    device = PiperFollower(PiperFollowerConfig(port="can0"))
     device.arm._arm_status.arm_status.ctrl_mode = 0x06
 
-    with pytest.raises(RuntimeError, match="Follower role command .* sent.*Power-cycle"):
-        device.connect(calibrate=False)
-
-    assert device.arm.role_commands[-1] == (0xFC, 0x00, 0x00, 0x00)
-
-
-def test_piper_lfs_pointer_urdf_raises_actionable_error(tmp_path):
-    pointer_file = tmp_path / "lfs_pointer.urdf"
-    pointer_file.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 123\n")
-
-    with pytest.raises(RuntimeError, match="Git LFS pointer files"):
-        piper_leader_module._ensure_not_lfs_pointer(
-            pointer_file, "assets/piper_description/urdf/pointer.urdf"
-        )
+    device.connect()
+    try:
+        assert device.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
+        assert [name for name, _ in device.arm.command_log[:3]] == ["role", "motion_mode", "enable"]
+    finally:
+        device.disconnect()
 
 
 @pytest.mark.parametrize(
@@ -627,8 +488,8 @@ def test_piper_lfs_pointer_urdf_raises_actionable_error(tmp_path):
     [
         (
             BiPiperLeaderConfig(
-                left_arm_config=PiperLeaderConfigBase(port="can1", manual_control=False, sync_gripper=True),
-                right_arm_config=PiperLeaderConfigBase(port="can3", manual_control=False, sync_gripper=True),
+                left_arm_config=PiperLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
+                right_arm_config=PiperLeaderConfigBase(port="can3", manual_control=True, sync_gripper=True),
                 process_isolation=False,
             ),
             BiPiperFollowerConfig(
@@ -644,8 +505,8 @@ def test_piper_lfs_pointer_urdf_raises_actionable_error(tmp_path):
         ),
         (
             BiPiperXLeaderConfig(
-                left_arm_config=PiperXLeaderConfigBase(port="can1", manual_control=False, sync_gripper=True),
-                right_arm_config=PiperXLeaderConfigBase(port="can3", manual_control=False, sync_gripper=True),
+                left_arm_config=PiperXLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
+                right_arm_config=PiperXLeaderConfigBase(port="can3", manual_control=True, sync_gripper=True),
                 process_isolation=False,
             ),
             BiPiperXFollowerConfig(
@@ -684,14 +545,11 @@ def test_bimanual_piper_leader_follower_roundtrip(
     assert isinstance(robot.left_arm, left_robot_cls)
     assert isinstance(robot.right_arm, right_robot_cls)
 
-    teleop.left_arm.calibration = make_identity_calibration()
-    teleop.right_arm.calibration = make_identity_calibration()
-    robot.left_arm.calibration = make_identity_calibration()
-    robot.right_arm.calibration = make_identity_calibration()
-
-    teleop.connect(calibrate=False)
-    robot.connect(calibrate=False)
+    teleop.connect()
+    robot.connect()
     try:
+        assert teleop.left_arm.arm.role_commands[-1][0] == 0xFA
+        assert teleop.right_arm.arm.role_commands[-1][0] == 0xFA
         action = teleop.get_action()
         assert "left_joint_1.pos" in action
         assert "right_joint_1.pos" in action
@@ -714,6 +572,8 @@ def test_bimanual_piper_leader_follower_roundtrip(
         assert obs["right_gripper.pos"] == 43.0
 
         teleop.send_feedback(action)
+        assert teleop.left_arm.arm.role_commands[-1][0] == 0xFC
+        assert teleop.right_arm.arm.role_commands[-1][0] == 0xFC
         assert teleop.left_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
         assert teleop.right_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
         assert teleop.left_arm.arm.last_gripper[0] == 42000
@@ -721,6 +581,29 @@ def test_bimanual_piper_leader_follower_roundtrip(
     finally:
         teleop.disconnect()
         robot.disconnect()
+    assert teleop.left_arm.arm.role_commands[-1][0] == 0xFA
+    assert teleop.right_arm.arm.role_commands[-1][0] == 0xFA
+
+
+def test_bimanual_piper_get_action_returns_available_side(monkeypatch):
+    patch_fake_sdk(monkeypatch)
+
+    teleop = make_teleoperator_from_config(
+        BiPiperLeaderConfig(
+            left_arm_config=PiperLeaderConfigBase(port="can2"),
+            right_arm_config=PiperLeaderConfigBase(port="can3"),
+            process_isolation=False,
+        )
+    )
+
+    teleop.connect()
+    try:
+        teleop.right_arm.arm._joint_ctrl.time_stamp = 0.0
+        action = teleop.get_action()
+        assert "left_joint_1.pos" in action
+        assert "right_joint_1.pos" not in action
+    finally:
+        teleop.disconnect()
 
 
 def test_bimanual_piper_follower_action_features_are_available_without_connect(monkeypatch):
@@ -746,8 +629,8 @@ def test_bimanual_piper_teleop_loop_smoke(monkeypatch):
 
     teleop = make_teleoperator_from_config(
         BiPiperLeaderConfig(
-            left_arm_config=PiperLeaderConfigBase(port="can0", manual_control=False, sync_gripper=True),
-            right_arm_config=PiperLeaderConfigBase(port="can1", manual_control=False, sync_gripper=True),
+            left_arm_config=PiperLeaderConfigBase(port="can0", manual_control=True, sync_gripper=True),
+            right_arm_config=PiperLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
             process_isolation=False,
         )
     )
@@ -758,18 +641,13 @@ def test_bimanual_piper_teleop_loop_smoke(monkeypatch):
         )
     )
 
-    teleop.left_arm.calibration = make_identity_calibration()
-    teleop.right_arm.calibration = make_identity_calibration()
-    robot.left_arm.calibration = make_identity_calibration()
-    robot.right_arm.calibration = make_identity_calibration()
-
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     robot.get_observation = lambda: (_ for _ in ()).throw(
         AssertionError("teleop_loop should not fetch observation for identity processors without display")
     )
 
-    teleop.connect(calibrate=False)
-    robot.connect(calibrate=False)
+    teleop.connect()
+    robot.connect()
     try:
         teleop_loop(
             teleop=teleop,
@@ -797,17 +675,12 @@ def test_bimanual_piper_leader_uses_process_proxy_by_default(monkeypatch):
             self.arm_cls = arm_cls
             self.arm_config = arm_config
             self.is_connected = False
-            self.is_calibrated = True
 
         action_features = dict.fromkeys(PIPER_ACTION_KEYS, float)
         feedback_features = dict.fromkeys(PIPER_ACTION_KEYS, float)
 
-        def connect(self, calibrate=True):
-            del calibrate
+        def connect(self):
             self.is_connected = True
-
-        def calibrate(self):
-            pass
 
         def configure(self):
             pass
@@ -838,79 +711,3 @@ def test_bimanual_piper_leader_uses_process_proxy_by_default(monkeypatch):
 
     assert isinstance(teleop.left_arm, DummyProxy)
     assert isinstance(teleop.right_arm, DummyProxy)
-
-
-def test_piper_follower_send_only_mode_skips_sdk_reader_threads(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-
-    robot = make_robot_from_config(
-        PiperFollowerConfig(port="can3", sync_gripper=True, require_calibration=False)
-    )
-    robot.calibration = make_identity_calibration()
-    robot.set_teleop_send_only_mode(True)
-
-    robot.connect(calibrate=False)
-    try:
-        assert robot.arm.connect_calls[-1]["start_thread"] is False
-        with pytest.raises(RuntimeError, match="send-only mode"):
-            robot.get_observation()
-    finally:
-        robot.disconnect()
-
-
-def test_piper_follower_send_only_mode_skips_camera_connects_and_stays_connected(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-
-    class FakeCamera:
-        def __init__(self):
-            self.is_connected = False
-            self.connect_calls = 0
-            self.disconnect_calls = 0
-
-        def connect(self):
-            self.connect_calls += 1
-            self.is_connected = True
-
-        def disconnect(self):
-            self.disconnect_calls += 1
-            self.is_connected = False
-
-    camera = FakeCamera()
-    monkeypatch.setattr(piper_follower_module, "make_cameras_from_configs", lambda _: {"front": camera})
-
-    robot = make_robot_from_config(
-        PiperFollowerConfig(port="can3", sync_gripper=True, require_calibration=False)
-    )
-    robot.calibration = make_identity_calibration()
-    robot.set_teleop_send_only_mode(True)
-
-    robot.connect(calibrate=False)
-    try:
-        assert robot.is_connected
-        assert camera.connect_calls == 0
-        assert not camera.is_connected
-    finally:
-        robot.disconnect()
-
-    assert camera.disconnect_calls == 0
-
-
-def test_bimanual_piper_send_only_mode_propagates_to_both_followers(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-
-    robot = make_robot_from_config(
-        BiPiperFollowerConfig(
-            left_arm_config=PiperFollowerConfigBase(port="can3", sync_gripper=True, require_calibration=False),
-            right_arm_config=PiperFollowerConfigBase(port="can2", sync_gripper=True, require_calibration=False),
-        )
-    )
-    robot.left_arm.calibration = make_identity_calibration()
-    robot.right_arm.calibration = make_identity_calibration()
-    robot.set_teleop_send_only_mode(True)
-
-    robot.connect(calibrate=False)
-    try:
-        assert robot.left_arm.arm.connect_calls[-1]["start_thread"] is False
-        assert robot.right_arm.arm.connect_calls[-1]["start_thread"] is False
-    finally:
-        robot.disconnect()
