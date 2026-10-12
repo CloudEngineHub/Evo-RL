@@ -579,11 +579,14 @@ The dataset is designed to support offline RL, value learning, advantage-conditi
 ## Citation
 
 ```bibtex
-@misc{evorl2026,
-  title        = {Evo-RL: Towards Iterative Policy Improvement in Real-World Offline RL},
-  author       = {Evo-RL Contributors},
-  year         = {2026},
-  howpublished = {\url{https://github.com/MINT-SJTU/Evo-RL}}
+@misc{ye2026evorl,
+  title         = {Evo-RL: Iterative Robot Reinforcement Learning from Selective Experience},
+  author        = {Kai Ye and Yifan Jin and Qianhang Luo and Hongru Zhang and Jiedong Zhang and Shuyuan Hu and Song-Yuan Wu and Jihai Xu and Jie Zhao and Bo Zhao},
+  year          = {2026},
+  eprint        = {2610.13345},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  url           = {https://arxiv.org/abs/2610.13345}
 }
 ```
 
