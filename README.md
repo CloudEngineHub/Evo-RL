@@ -5,13 +5,12 @@
   <a href="https://github.com/huggingface/lerobot"><img alt="lerobot version" src="https://img.shields.io/badge/LeRobot-0.4.4-f59e0b"/></a>
   <a href="https://evorl.example.com/wechat-post"><img alt="wechat post" src="https://img.shields.io/badge/WeChat-Official%20Post-07c160"/></a>
   <a href="#community-channels"><img alt="wechat group join us" src="https://img.shields.io/badge/WeChat%20Group-Join%20Us-a855f7?logo=wechat&logoColor=white"/></a>
-  <a href="#citation"><img alt="paper coming soon" src="https://img.shields.io/static/v1?label=Paper&message=Coming%20Soon&color=9ca3af"/></a>
-  <a href="#model--dataset"><img alt="hugging face model coming soon" src="https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Model&message=Coming%20Soon&color=9ca3af"/></a>
+  <a href="https://arxiv.org/abs/2610.13345"><img alt="Evo-RL paper on arXiv" src="https://img.shields.io/badge/Paper-arXiv%3A2610.13345-b31b1b"/></a>
   <a href="https://huggingface.co/datasets/MINT-SJTU/RW-RL-Dataset"><img alt="RW-RL dataset on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-RW--RL-ffcc4d"/></a>
   <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/License-Apache--2.0-ef4444"/></a>
 </p>
 
-<p align="center"><strong>SJTU &amp; Evo-Tech</strong></p>
+<p align="center"><strong>MINT@SJTU</strong></p>
 
 <p align="center"><strong>Architecture Overview</strong></p>
 
